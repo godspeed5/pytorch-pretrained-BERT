@@ -30,6 +30,7 @@ import shutil
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
+import torch.utils.checkpoint as checkpoint
 
 from .file_utils import cached_path
 
