@@ -30,7 +30,7 @@ import shutil
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
-import torch.utils.checkpoint as checkpoint
+from torch.utils.checkpoint import checkpoint, checkpoint_sequential
 
 from .file_utils import cached_path
 
@@ -320,20 +320,26 @@ class BertLayer(nn.Module):
 
 
 class BertEncoder(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, ckp_modules=[]):
         super(BertEncoder, self).__init__()
         layer = BertLayer(config)
+        self.ckp_modules = ckp_modules                                                                                     
+        self.gpu_usage = []
         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.num_hidden_layers)])    
 
     def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True):
         all_encoder_layers = []
-        for layer_module in self.layer:
-            hidden_states=torch.utils.checkpoint.checkpoint(layer_module, hidden_states, attention_mask)
+        for i, layer_module in enumerate(self.layer):
+            if (i + 1) in self.ckp_modules:                                                                                     
+                hidden_states = checkpoint(layer_module, hidden_states, attention_mask)                                             
+            else:                                                                                                                   
+                hidden_states = layer_module(hidden_states, attention_mask)                                                        
+            self.gpu_usage.append(torch.cuda.memory_allocated())                                                                    
             if output_all_encoded_layers:
                 all_encoder_layers.append(hidden_states)
         if not output_all_encoded_layers:
             all_encoder_layers.append(hidden_states)
-        return all_encoder_layers
+        return all_encoder_layers, self.gpu_usage
 
 
 class BertPooler(nn.Module):
@@ -446,7 +452,7 @@ class PreTrainedBertModel(nn.Module):
             module.bias.data.zero_()
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name, cache_dir=None, *inputs, **kwargs):
+    def from_pretrained(cls, pretrained_model_name, ckp_modules, cache_dir=None, *inputs, **kwargs):
         """
         Instantiate a PreTrainedBertModel from a pre-trained model file.
         Download and cache the pre-trained model file if needed.
@@ -500,9 +506,9 @@ class PreTrainedBertModel(nn.Module):
         # Load config
         config_file = os.path.join(serialization_dir, CONFIG_NAME)
         config = BertConfig.from_json_file(config_file)
-        logger.info("Model config {}".format(config))
+        # logger.info("Model config {}".format(config))
         # Instantiate model.
-        model = cls(config, *inputs, **kwargs)
+        model = cls(config, ckp_modules, *inputs, **kwargs)
         weights_path = os.path.join(serialization_dir, WEIGHTS_NAME)
         state_dict = torch.load(weights_path)
 
@@ -579,10 +585,10 @@ class BertModel(PreTrainedBertModel):
     all_encoder_layers, pooled_output = model(input_ids, token_type_ids, input_mask)
     ```
     """
-    def __init__(self, config):
+    def __init__(self, config, ckp_modules):
         super(BertModel, self).__init__(config)
         self.embeddings = BertEmbeddings(config)
-        self.encoder = BertEncoder(config)
+        self.encoder = BertEncoder(config, ckp_modules)
         self.pooler = BertPooler(config)
         self.apply(self.init_bert_weights)
 
@@ -608,14 +614,14 @@ class BertModel(PreTrainedBertModel):
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
         embedding_output = self.embeddings(input_ids, token_type_ids)
-        encoded_layers = self.encoder(embedding_output,
+        encoded_layers, gpu_usage = self.encoder(embedding_output,
                                       extended_attention_mask,
                                       output_all_encoded_layers=output_all_encoded_layers)
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)
         if not output_all_encoded_layers:
             encoded_layers = encoded_layers[-1]
-        return encoded_layers, pooled_output
+        return encoded_layers, pooled_output, gpu_usage
 
 
 class BertForPreTraining(PreTrainedBertModel):
