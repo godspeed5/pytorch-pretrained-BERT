@@ -320,7 +320,7 @@ class BertLayer(nn.Module):
 
 
 class BertEncoder(nn.Module):
-    def __init__(self, config, ckp_modules=[]):
+    def __init__(self, config, ckp_modules):
         super(BertEncoder, self).__init__()
         layer = BertLayer(config)
         self.ckp_modules = ckp_modules                                                                                     
